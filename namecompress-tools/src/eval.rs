@@ -12,9 +12,6 @@ use crate::corpus;
 use crate::model::{CharModel, encode_chars};
 use crate::stats::Interner;
 
-/// Every tenth row is held out.
-const TEST_MODULUS: u64 = 10;
-
 /// Marginal distribution with an explicit escape into a character model,
 /// mirroring the codec's dictionary-plus-escape structure.
 struct Marginal {
@@ -88,7 +85,7 @@ pub fn run(path: &Path) -> std::io::Result<()> {
 
     // --- training pass -----------------------------------------------------
     for (index, record) in corpus::read(path)?.enumerate() {
-        if index as u64 % TEST_MODULUS == 0 {
+        if crate::split::is_held_out(index) {
             continue;
         }
         let f = firsts.observe(&record.first);
@@ -116,7 +113,7 @@ pub fn run(path: &Path) -> std::io::Result<()> {
     // --- evaluation pass ---------------------------------------------------
     let mut totals = Totals::default();
     for (index, record) in corpus::read(path)?.enumerate() {
-        if index as u64 % TEST_MODULUS != 0 {
+        if !crate::split::is_held_out(index) {
             continue;
         }
         totals.rows += 1;
@@ -185,7 +182,15 @@ pub fn run(path: &Path) -> std::io::Result<()> {
     println!("last, independent     {independent:.3}");
     println!("last, conditional     {conditional:.3}");
     println!("realised MI gain      {:.3}", independent - conditional);
-    println!("\ntotal independent     {:.3} bits = {:.3} bytes", first + independent, (first + independent) / 8.0);
-    println!("total conditional     {:.3} bits = {:.3} bytes", first + conditional, (first + conditional) / 8.0);
+    println!(
+        "\ntotal independent     {:.3} bits = {:.3} bytes",
+        first + independent,
+        (first + independent) / 8.0
+    );
+    println!(
+        "total conditional     {:.3} bits = {:.3} bytes",
+        first + conditional,
+        (first + conditional) / 8.0
+    );
     Ok(())
 }

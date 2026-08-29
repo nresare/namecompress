@@ -22,8 +22,6 @@ use namecompress::table::TableBuilder;
 use crate::corpus;
 use crate::packing::Packing;
 
-const TEST_MODULUS: u64 = 10;
-
 /// Pruning thresholds to consider, finest model first.
 const PRUNE_CANDIDATES: [u32; 6] = [256, 1024, 4096, 16_384, 65_536, 262_144];
 
@@ -154,7 +152,7 @@ pub fn run(path: &Path, out: &Path, target: usize, check_modulus: u32) -> std::i
     let mut given_groups: HashMap<String, Group> = HashMap::new();
     let mut surname_groups: HashMap<String, Group> = HashMap::new();
     for (index, record) in corpus::read(path)?.enumerate() {
-        if index as u64 % TEST_MODULUS == 0 {
+        if crate::split::is_held_out(index) {
             continue;
         }
         fold(&mut given_groups, &record.first);

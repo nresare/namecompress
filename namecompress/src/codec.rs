@@ -191,10 +191,7 @@ fn decode_field(
         }
         table.alphabet.decode(&history).ok_or(Error::Malformed)?
     } else {
-        dictionary
-            .name(symbol)
-            .ok_or(Error::Malformed)?
-            .to_owned()
+        dictionary.name(symbol).ok_or(Error::Malformed)?.to_owned()
     };
 
     let shape = shape_for_target(decoder.target(STATIC_SCALE)).ok_or(Error::Malformed)?;
@@ -237,11 +234,7 @@ fn compress_raw(table: &Table, name: &str) -> Result<Vec<u8>, Error> {
         return Err(Error::TooLong);
     }
     let mut encoder = Encoder::new();
-    encoder.encode(
-        MODE_RAW_START,
-        MODE_TOTAL - MODE_RAW_START,
-        MODE_TOTAL,
-    );
+    encoder.encode(MODE_RAW_START, MODE_TOTAL - MODE_RAW_START, MODE_TOTAL);
     encoder.encode(bytes.len() as u32 - 1, 1, MAX_RAW_LEN as u32);
     for &byte in bytes {
         encoder.encode(u32::from(byte), 1, 256);
@@ -299,7 +292,14 @@ mod tests {
             crate::chars::Alphabet::new("abcdefghijklmnopqrstuvwxyzåäö -'".chars().collect())
                 .expect("valid alphabet");
         let mut builder = CharModelBuilder::new(alphabet.symbols());
-        for name in ["smith", "jones", "brown", "o'brien", "anna-karin", "nkemdirim"] {
+        for name in [
+            "smith",
+            "jones",
+            "brown",
+            "o'brien",
+            "anna-karin",
+            "nkemdirim",
+        ] {
             builder.train(&alphabet.encode(name).expect("in alphabet"), 100);
         }
         let chars = builder.build(0);

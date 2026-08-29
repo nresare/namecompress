@@ -82,13 +82,8 @@ impl Dictionary {
         // proportion to the counts. Built this way the total can never exceed
         // the scale, however long the rare tail is.
         let spare = u64::from(scale - symbols);
-        let share = |count: u64| -> u32 {
-            if total == 0 {
-                1
-            } else {
-                1 + (count * spare / total) as u32
-            }
-        };
+        let share =
+            |count: u64| -> u32 { 1 + (count * spare).checked_div(total).unwrap_or(0) as u32 };
         let mut freqs: Vec<u32> = entries.iter().map(|&(_, c)| share(c)).collect();
         freqs.push(share(escape_weight));
 
@@ -257,8 +252,9 @@ impl Table {
         if version != VERSION {
             return Err("unsupported table version");
         }
-        let check_modulus =
-            u32::from(u16::from_le_bytes(read(2, &mut cursor)?.try_into().expect("two bytes")));
+        let check_modulus = u32::from(u16::from_le_bytes(
+            read(2, &mut cursor)?.try_into().expect("two bytes"),
+        ));
         let id = u32::from_le_bytes(read(4, &mut cursor)?.try_into().expect("four bytes"));
         if check_modulus == 0 {
             return Err("check modulus must be non-zero");
@@ -298,7 +294,9 @@ impl Table {
 /// that common names keep precision, capped at what the coder accepts.
 fn field_scale(symbols: u32) -> u32 {
     let wanted = symbols.saturating_mul(SCALE_HEADROOM).max(MIN_FIELD_SCALE);
-    let rounded = wanted.checked_next_power_of_two().unwrap_or(crate::range::MAX_TOTAL);
+    let rounded = wanted
+        .checked_next_power_of_two()
+        .unwrap_or(crate::range::MAX_TOTAL);
     rounded.min(crate::range::MAX_TOTAL)
 }
 
@@ -343,7 +341,7 @@ mod tests {
     fn sample_table() -> Table {
         let alphabet = Alphabet::new("abcdefghijklmnopqrstuvwxyzåäö -'".chars().collect())
             .expect("valid alphabet");
-        let mut builder = crate::chars::CharModelBuilder::new(alphabet.symbols());
+        let mut builder = CharModelBuilder::new(alphabet.symbols());
         for name in ["smith", "jones", "o'brien", "anna-karin", "wangari"] {
             builder.train(&alphabet.encode(name).expect("in alphabet"), 100);
         }

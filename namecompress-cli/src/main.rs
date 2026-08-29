@@ -10,8 +10,10 @@ use std::process::ExitCode;
 use clap::Parser;
 use namecompress::Table;
 
-/// Leading bytes of a zstd frame, so a compressed table can be given directly.
+/// Leading bytes of the compressed forms a table may arrive in, so the file
+/// the builder produced can be given directly.
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+const XZ_MAGIC: [u8; 6] = [0xfd, b'7', b'z', b'X', b'Z', 0x00];
 
 /// Ceiling on a decompressed table, guarding against a hostile frame.
 const MAX_TABLE_BYTES: usize = 256 << 20;
@@ -46,6 +48,12 @@ fn load_table(path: &Path) -> Result<Table, String> {
     let bytes = if bytes.starts_with(&ZSTD_MAGIC) {
         zstd::stream::decode_all(&bytes[..])
             .map_err(|e| format!("{}: could not decompress: {e}", path.display()))?
+    } else if bytes.starts_with(&XZ_MAGIC) {
+        let mut out = Vec::new();
+        xz2::read::XzDecoder::new(&bytes[..])
+            .read_to_end(&mut out)
+            .map_err(|e| format!("{}: could not decompress: {e}", path.display()))?;
+        out
     } else {
         bytes
     };

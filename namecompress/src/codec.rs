@@ -7,7 +7,7 @@
 
 use crate::chars;
 use crate::range::{Decoder, Encoder};
-use crate::table::{Dictionary, FIELD_SCALE, Table};
+use crate::table::{Dictionary, Table};
 
 /// Total for the small static distributions below.
 const STATIC_SCALE: u32 = 1 << 16;
@@ -128,7 +128,7 @@ fn encode_field(
             let canonical = dictionary.name(symbol)?;
             let shape = derive_shape(canonical, name)?;
             let (start, size) = dictionary.range(symbol);
-            encoder.encode(start, size, FIELD_SCALE);
+            encoder.encode(start, size, dictionary.total());
             let (start, size) = shape_range(shape);
             encoder.encode(start, size, STATIC_SCALE);
         }
@@ -140,7 +140,7 @@ fn encode_field(
                 return None;
             }
             let (start, size) = dictionary.range(dictionary.escape_symbol());
-            encoder.encode(start, size, FIELD_SCALE);
+            encoder.encode(start, size, dictionary.total());
 
             let mut history: Vec<u8> = Vec::with_capacity(symbols.len());
             for &symbol in &symbols {
@@ -161,9 +161,9 @@ fn decode_field(
     dictionary: &Dictionary,
     table: &Table,
 ) -> Result<String, Error> {
-    let symbol = dictionary.symbol_for(decoder.target(FIELD_SCALE));
+    let symbol = dictionary.symbol_for(decoder.target(dictionary.total()));
     let (start, size) = dictionary.range(symbol);
-    decoder.advance(start, size, FIELD_SCALE);
+    decoder.advance(start, size, dictionary.total());
 
     let canonical = if symbol == dictionary.escape_symbol() {
         let mut history: Vec<u8> = Vec::new();
@@ -298,10 +298,11 @@ mod tests {
         let alphabet =
             crate::chars::Alphabet::new("abcdefghijklmnopqrstuvwxyzåäö -'".chars().collect())
                 .expect("valid alphabet");
-        let mut chars = CharModelBuilder::new(alphabet.symbols());
+        let mut builder = CharModelBuilder::new(alphabet.symbols());
         for name in ["smith", "jones", "brown", "o'brien", "anna-karin", "nkemdirim"] {
-            chars.train(&alphabet.encode(name).expect("in alphabet"), 100);
+            builder.train(&alphabet.encode(name).expect("in alphabet"), 100);
         }
+        let chars = builder.build(0);
         TableBuilder {
             given: vec![
                 ("John".into(), 5000),
@@ -313,7 +314,6 @@ mod tests {
             surname_escape: 900,
             alphabet,
             chars,
-            prune: 0,
             check_modulus: 256,
         }
         .finish()

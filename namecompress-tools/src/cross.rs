@@ -6,15 +6,15 @@
 
 use std::path::Path;
 
-use namecompress::{Error, Table};
+use namecompress::Error;
 
 use crate::corpus;
 
 const TEST_MODULUS: u64 = 10;
 
 pub fn run(corpus_path: &Path, a_path: &Path, b_path: &Path) -> std::io::Result<()> {
-    let a = Table::load(&std::fs::read(a_path)?).expect("table a");
-    let b = Table::load(&std::fs::read(b_path)?).expect("table b");
+    let a = crate::packing::read_table(a_path)?;
+    let b = crate::packing::read_table(b_path)?;
 
     let mut rows = 0u64;
     let mut malformed = 0u64;

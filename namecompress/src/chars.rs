@@ -29,6 +29,7 @@ const MAX_ORDER: usize = 3;
 
 /// The characters a table can model, plus an implicit terminator whose symbol
 /// is `characters.len()`.
+#[derive(Clone)]
 pub struct Alphabet {
     characters: Vec<char>,
     lookup: HashMap<char, u8>,
@@ -108,6 +109,7 @@ struct Context {
     distinct: u32,
 }
 
+#[derive(Clone)]
 pub struct CharModel {
     symbols: usize,
     /// Per order, a sparse map from packed context to its counts. Contexts are
@@ -250,9 +252,12 @@ impl CharModelBuilder {
     }
 
     /// Drops thinly-observed contexts and quantises the rest to 8 bits.
-    pub fn finish(self, prune: u32) -> CharModel {
+    ///
+    /// Borrows rather than consumes, so a caller searching for a pruning
+    /// threshold can try several against one trained builder.
+    pub fn build(&self, prune: u32) -> CharModel {
         let mut orders = Vec::with_capacity(MAX_ORDER + 1);
-        for (order, counts) in self.orders.into_iter().enumerate() {
+        for (order, counts) in self.orders.iter().enumerate() {
             let mut table = HashMap::new();
             for (context, row) in counts {
                 let total: u32 = row.iter().sum();
@@ -274,7 +279,7 @@ impl CharModelBuilder {
                     entry.total += u32::from(q);
                     entry.distinct += 1;
                 }
-                table.insert(context, entry);
+                table.insert(*context, entry);
             }
             orders.push(table);
         }

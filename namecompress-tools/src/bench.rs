@@ -3,15 +3,12 @@
 
 use std::path::Path;
 
-use namecompress::Table;
-
 use crate::corpus;
 
 const TEST_MODULUS: u64 = 10;
 
 pub fn run(corpus_path: &Path, table_path: &Path) -> std::io::Result<()> {
-    let bytes = std::fs::read(table_path)?;
-    let table = Table::load(&bytes).unwrap_or_else(|e| panic!("table rejected: {e}"));
+    let table = crate::packing::read_table(table_path)?;
 
     let mut rows = 0u64;
     let mut raw_bytes = 0u64;

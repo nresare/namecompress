@@ -2,19 +2,26 @@
 
 use std::collections::HashMap;
 
-use crate::chars::{Alphabet, CharModel, CharModelBuilder};
+use crate::chars::{Alphabet, CharModel};
 use crate::varint;
 
 const MAGIC: &[u8; 4] = b"NCMP";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 
-/// Denominator for dictionary frequencies. Comfortably inside the coder's
-/// limit while leaving room for a rare symbol in a large dictionary.
-pub const FIELD_SCALE: u32 = 1 << 20;
+/// Smallest denominator used for dictionary frequencies. Larger dictionaries
+/// scale up from here, since every symbol needs a frequency of at least one
+/// and the rare tail would otherwise consume the whole scale.
+const MIN_FIELD_SCALE: u32 = 1 << 20;
+
+/// Headroom above the symbol count, so common names keep useful precision
+/// rather than being crowded out by the rare tail.
+const SCALE_HEADROOM: u32 = 16;
 
 /// A dictionary of names plus the escape symbol that follows them.
 pub struct Dictionary {
     names: Vec<String>,
+    /// Denominator these frequencies are expressed against.
+    scale: u32,
     /// `cumulative[i]` is the start of symbol `i`; the last entry is
     /// [`FIELD_SCALE`]. Symbol `names.len()` is the escape.
     cumulative: Vec<u32>,
@@ -44,6 +51,11 @@ impl Dictionary {
         self.folded.get(&name.to_lowercase()).copied()
     }
 
+    /// Denominator for this dictionary's frequencies.
+    pub fn total(&self) -> u32 {
+        self.scale
+    }
+
     pub fn range(&self, symbol: u32) -> (u32, u32) {
         let start = self.cumulative[symbol as usize];
         (start, self.cumulative[symbol as usize + 1] - start)
@@ -61,28 +73,36 @@ impl Dictionary {
         let mut entries = entries.to_vec();
         entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         let entries = &entries[..];
-        let total: u64 = entries.iter().map(|&(_, c)| c).sum::<u64>() + escape_weight;
-        // Normalise to FIELD_SCALE with every symbol guaranteed non-zero.
-        let mut freqs: Vec<u32> = entries
-            .iter()
-            .map(|&(_, c)| {
-                ((c * u64::from(FIELD_SCALE)) / total).max(1) as u32
-            })
-            .collect();
-        freqs.push(
-            ((escape_weight * u64::from(FIELD_SCALE)) / total).max(1) as u32,
-        );
 
-        // Reconcile against FIELD_SCALE by adjusting the largest entry, which
-        // has the most room to absorb the discrepancy.
+        let symbols = entries.len() as u32 + 1;
+        let scale = field_scale(symbols);
+        let total: u64 = entries.iter().map(|&(_, c)| c).sum::<u64>() + escape_weight;
+
+        // Give every symbol one unit first, then share out what is left in
+        // proportion to the counts. Built this way the total can never exceed
+        // the scale, however long the rare tail is.
+        let spare = u64::from(scale - symbols);
+        let share = |count: u64| -> u32 {
+            if total == 0 {
+                1
+            } else {
+                1 + (count * spare / total) as u32
+            }
+        };
+        let mut freqs: Vec<u32> = entries.iter().map(|&(_, c)| share(c)).collect();
+        freqs.push(share(escape_weight));
+
+        // Rounding leaves the total a little short; give the remainder to the
+        // largest entry, which has the most room to absorb it.
         let sum: u32 = freqs.iter().sum();
+        debug_assert!(sum <= scale, "frequencies exceeded the scale");
         let largest = freqs
             .iter()
             .enumerate()
             .max_by_key(|&(_, &f)| f)
             .map(|(i, _)| i)
             .expect("escape symbol always present");
-        freqs[largest] = freqs[largest] + FIELD_SCALE - sum;
+        freqs[largest] += scale - sum;
 
         let mut cumulative = Vec::with_capacity(freqs.len() + 1);
         let mut running = 0;
@@ -101,12 +121,14 @@ impl Dictionary {
 
         Self {
             names,
+            scale,
             cumulative,
             folded,
         }
     }
 
     fn write(&self, out: &mut Vec<u8>) {
+        varint::push(out, u64::from(self.scale));
         varint::push(out, self.names.len() as u64);
         // Front-coded names: shared prefix length, then the differing suffix.
         let mut blob = Vec::new();
@@ -137,6 +159,11 @@ impl Dictionary {
     }
 
     fn parse(bytes: &[u8], cursor: &mut usize) -> Result<Self, &'static str> {
+        let scale = u32::try_from(varint::read(bytes, cursor).ok_or("frequency scale")?)
+            .map_err(|_| "frequency scale out of range")?;
+        if scale == 0 || scale > crate::range::MAX_TOTAL {
+            return Err("frequency scale out of range");
+        }
         let count = varint::read(bytes, cursor).ok_or("dictionary count")? as usize;
         let blob_len = varint::read(bytes, cursor).ok_or("blob length")? as usize;
         let blob = bytes
@@ -175,7 +202,7 @@ impl Dictionary {
             running = running.checked_add(delta).ok_or("frequency overflow")?;
         }
         cumulative.push(running);
-        if running != FIELD_SCALE {
+        if running != scale {
             return Err("frequencies do not sum to the field scale");
         }
 
@@ -186,6 +213,7 @@ impl Dictionary {
             .collect();
         Ok(Self {
             names,
+            scale,
             cumulative,
             folded,
         })
@@ -266,6 +294,17 @@ impl Table {
     }
 }
 
+/// The denominator to express `symbols` frequencies against: enough headroom
+/// that common names keep precision, capped at what the coder accepts.
+fn field_scale(symbols: u32) -> u32 {
+    let wanted = symbols.saturating_mul(SCALE_HEADROOM).max(MIN_FIELD_SCALE);
+    let rounded = wanted.checked_next_power_of_two().unwrap_or(crate::range::MAX_TOTAL);
+    rounded.min(crate::range::MAX_TOTAL)
+}
+
+/// Largest dictionary the frequency scale can represent.
+pub const MAX_DICTIONARY: usize = (crate::range::MAX_TOTAL / 2) as usize;
+
 /// Assembles a table from corpus statistics.
 pub struct TableBuilder {
     pub given: Vec<(String, u64)>,
@@ -273,8 +312,7 @@ pub struct TableBuilder {
     pub surname: Vec<(String, u64)>,
     pub surname_escape: u64,
     pub alphabet: Alphabet,
-    pub chars: CharModelBuilder,
-    pub prune: u32,
+    pub chars: CharModel,
     pub check_modulus: u32,
 }
 
@@ -282,12 +320,11 @@ impl TableBuilder {
     pub fn finish(self) -> Table {
         let given = Dictionary::build(&self.given, self.given_escape.max(1));
         let surname = Dictionary::build(&self.surname, self.surname_escape.max(1));
-        let chars = self.chars.finish(self.prune);
         let mut table = Table {
             given,
             surname,
             alphabet: self.alphabet,
-            chars,
+            chars: self.chars,
             check_modulus: self.check_modulus,
             id: 0,
         };
@@ -306,10 +343,11 @@ mod tests {
     fn sample_table() -> Table {
         let alphabet = Alphabet::new("abcdefghijklmnopqrstuvwxyzåäö -'".chars().collect())
             .expect("valid alphabet");
-        let mut chars = CharModelBuilder::new(alphabet.symbols());
+        let mut builder = crate::chars::CharModelBuilder::new(alphabet.symbols());
         for name in ["smith", "jones", "o'brien", "anna-karin", "wangari"] {
-            chars.train(&alphabet.encode(name).expect("in alphabet"), 100);
+            builder.train(&alphabet.encode(name).expect("in alphabet"), 100);
         }
+        let chars = builder.build(0);
         TableBuilder {
             given: vec![
                 ("John".into(), 500),
@@ -322,7 +360,6 @@ mod tests {
             surname_escape: 100,
             alphabet,
             chars,
-            prune: 0,
             check_modulus: 256,
         }
         .finish()
@@ -351,5 +388,47 @@ mod tests {
     fn rejects_foreign_bytes() {
         assert!(Table::parse(b"not a table").is_none());
         assert!(Table::parse(&[]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod scale_tests {
+    use super::*;
+
+    /// A long tail of once-seen names is the case that overflows a fixed
+    /// frequency scale: every symbol needs at least one unit, and with enough
+    /// symbols those units alone exceed the scale.
+    #[test]
+    fn survives_a_long_rare_tail() {
+        let mut entries: Vec<(String, u64)> = vec![("Smith".to_owned(), 900_000)];
+        entries.extend((0..200_000).map(|i| (format!("rare{i:06}"), 1)));
+
+        let dictionary = Dictionary::build(&entries, 1_000);
+        assert_eq!(
+            dictionary.cumulative.last().copied(),
+            Some(dictionary.total()),
+            "frequencies must sum to the scale"
+        );
+        for symbol in 0..=dictionary.escape_symbol() {
+            let (_, size) = dictionary.range(symbol);
+            assert!(size > 0, "symbol {symbol} is uncodable");
+        }
+
+        // And it must survive a round trip through the table format.
+        let mut bytes = Vec::new();
+        dictionary.write(&mut bytes);
+        let mut cursor = 0usize;
+        let parsed = Dictionary::parse(&bytes, &mut cursor).expect("dictionary parses");
+        assert_eq!(parsed.len(), dictionary.len());
+        assert_eq!(parsed.total(), dictionary.total());
+    }
+
+    /// Small dictionaries should keep compact frequencies rather than paying
+    /// for precision they cannot use.
+    #[test]
+    fn scale_grows_only_when_needed() {
+        assert_eq!(field_scale(10), MIN_FIELD_SCALE);
+        assert!(field_scale(200_000) > MIN_FIELD_SCALE);
+        assert!(field_scale(u32::MAX) <= crate::range::MAX_TOTAL);
     }
 }

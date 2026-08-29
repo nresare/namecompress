@@ -1,5 +1,12 @@
 //! Table generation.
 //!
+//! The caller states roughly how large the shipped table may be and this
+//! chooses everything else: how much of the budget the character model may
+//! take, how aggressively to prune it, and how many dictionary entries fit in
+//! what remains. Sizes are measured on the actually-compressed table rather
+//! than estimated, because compression of front-coded names is not linear in
+//! the entry count.
+//!
 //! Dictionary entries are canonical spellings: variants differing only by case
 //! are merged into the most frequent form and recovered at decode time by the
 //! shape symbol, so `SMITH`, `Smith`, and `smith` share one entry and pool
@@ -13,8 +20,27 @@ use namecompress::codec::derive_shape;
 use namecompress::table::TableBuilder;
 
 use crate::corpus;
+use crate::packing::Packing;
 
 const TEST_MODULUS: u64 = 10;
+
+/// Pruning thresholds to consider, finest model first.
+const PRUNE_CANDIDATES: [u32; 6] = [256, 1024, 4096, 16_384, 65_536, 262_144];
+
+/// Share of the budget the character model may occupy. It serves only escaped
+/// names, so spending much more on it than this buys less than dictionary
+/// entries would.
+const CHAR_MODEL_SHARE: f64 = 0.25;
+
+/// Surnames get more dictionary slots than given names: they are both more
+/// numerous and less predictable.
+const SURNAME_RATIO: usize = 2;
+
+/// Enough refinement to converge; each step costs one compression.
+const MAX_ATTEMPTS: usize = 12;
+
+/// Stop once the table is within this fraction of the target from below.
+const CLOSE_ENOUGH: f64 = 0.02;
 
 /// Counts of a case-folded name group, with the spellings seen for it.
 #[derive(Default)]
@@ -32,7 +58,6 @@ impl Group {
             .expect("group is non-empty")
     }
 
-    /// Total occurrences across all spellings.
     fn total(&self) -> u64 {
         self.variants.values().sum()
     }
@@ -58,9 +83,9 @@ fn fold(groups: &mut HashMap<String, Group>, name: &str) {
         .or_insert(0) += 1;
 }
 
-/// Chooses the alphabet from the characters the corpus actually uses,
-/// weighted by how often they occur. One symbol is reserved for the
-/// terminator, and anything that does not fit is left to the raw fallback.
+/// Chooses the alphabet from the characters the corpus actually uses, weighted
+/// by how often they occur. One symbol is reserved for the terminator, and
+/// anything that does not fit is left to the raw fallback.
 fn derive_alphabet(groups: &[&HashMap<String, Group>]) -> (Alphabet, f64) {
     let mut weights: HashMap<char, u64> = HashMap::new();
     let mut total = 0u64;
@@ -94,34 +119,40 @@ fn derive_alphabet(groups: &[&HashMap<String, Group>]) -> (Alphabet, f64) {
     )
 }
 
-/// Selects the `n` most frequent groups as dictionary entries, returning them
-/// and the escape weight for everything else.
-fn select(groups: HashMap<String, Group>, n: usize) -> (Vec<(String, u64)>, u64) {
-    let mut scored: Vec<(String, u64)> = groups
+/// Groups ordered by descending representable count, with the total number of
+/// distinct groups.
+fn rank(groups: &HashMap<String, Group>) -> (Vec<(String, u64)>, u64) {
+    let mut ranked: Vec<(String, u64)> = groups
         .values()
         .map(|g| (g.canonical().to_owned(), g.representable()))
         .collect();
-    scored.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-
-    let distinct = scored.len() as u64;
-    let kept: Vec<(String, u64)> = scored.iter().take(n).cloned().collect();
-    let excluded: u64 = scored.iter().skip(n).map(|&(_, c)| c).sum();
-    // Witten-Bell: the escape carries the excluded mass plus a novelty term,
-    // so names never seen in training remain codable.
-    (kept, excluded + distinct)
+    ranked.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let distinct = ranked.len() as u64;
+    (ranked, distinct)
 }
 
-pub fn run(
-    path: &Path,
-    out: &Path,
-    given_size: usize,
-    surname_size: usize,
-    prune: u32,
-    check_modulus: u32,
-) -> std::io::Result<()> {
+/// The top `n` entries, and the escape weight covering everything else.
+fn take(ranked: &[(String, u64)], distinct: u64, n: usize) -> (Vec<(String, u64)>, u64) {
+    let n = n.min(ranked.len());
+    let excluded: u64 = ranked[n..].iter().map(|&(_, c)| c).sum();
+    // Witten-Bell: the escape carries the excluded mass plus a novelty term,
+    // so names never seen in training remain codable.
+    (ranked[..n].to_vec(), excluded + distinct)
+}
+
+/// Describes what the search settled on.
+struct Chosen {
+    packed: Vec<u8>,
+    raw_len: usize,
+    given: usize,
+    surnames: usize,
+}
+
+pub fn run(path: &Path, out: &Path, target: usize, check_modulus: u32) -> std::io::Result<()> {
+    let packing = Packing::for_path(out);
+
     let mut given_groups: HashMap<String, Group> = HashMap::new();
     let mut surname_groups: HashMap<String, Group> = HashMap::new();
-
     for (index, record) in corpus::read(path)?.enumerate() {
         if index as u64 % TEST_MODULUS == 0 {
             continue;
@@ -132,10 +163,9 @@ pub fn run(
 
     let (alphabet, coverage) = derive_alphabet(&[&given_groups, &surname_groups]);
     println!(
-        "alphabet {} characters, covering {:.3}% of characters written: {}",
+        "alphabet     {} characters, {:.2}% character coverage",
         alphabet.characters().len(),
-        100.0 * coverage,
-        alphabet.characters().iter().collect::<String>()
+        100.0 * coverage
     );
 
     // The folded groups already carry occurrence counts, so the character
@@ -144,66 +174,96 @@ pub fn run(
     for set in [&given_groups, &surname_groups] {
         for (folded, group) in set {
             if let Some(symbols) = alphabet.encode(folded) {
-                let weight = u32::try_from(group.total()).unwrap_or(u32::MAX);
-                chars.train(&symbols, weight);
+                chars.train(&symbols, u32::try_from(group.total()).unwrap_or(u32::MAX));
             }
         }
     }
 
-    let (given, given_escape) = select(given_groups, given_size);
-    let (surname, surname_escape) = select(surname_groups, surname_size);
+    // Pick the finest character model whose share of the budget it fits into.
+    let allowance = (target as f64 * CHAR_MODEL_SHARE) as usize;
+    let mut model = chars.build(*PRUNE_CANDIDATES.last().expect("non-empty"));
+    let mut model_size = 0usize;
+    for &prune in &PRUNE_CANDIDATES {
+        let candidate = chars.build(prune);
+        let mut serialised = Vec::new();
+        candidate.write(&mut serialised);
+        let size = packing.pack(&serialised)?.len();
+        if size <= allowance || prune == *PRUNE_CANDIDATES.last().expect("non-empty") {
+            println!("model        prune {prune}, {size} B of {allowance} B allowance");
+            model = candidate;
+            model_size = size;
+            break;
+        }
+    }
+
+    let (given_ranked, given_distinct) = rank(&given_groups);
+    let (surname_ranked, surname_distinct) = rank(&surname_groups);
+
+    // Refine the dictionary size against the measured compressed size. The
+    // character model is a near-fixed overhead, so scale only what remains.
+    let mut entries = 2_000usize;
+    let mut best: Option<Chosen> = None;
+    for _ in 0..MAX_ATTEMPTS {
+        let (given, given_escape) = take(&given_ranked, given_distinct, entries);
+        let (surname, surname_escape) =
+            take(&surname_ranked, surname_distinct, entries * SURNAME_RATIO);
+
+        let table = TableBuilder {
+            given,
+            given_escape,
+            surname,
+            surname_escape,
+            alphabet: alphabet.clone(),
+            chars: model.clone(),
+            check_modulus,
+        }
+        .finish();
+        let raw = table.write();
+        let packed = packing.pack(&raw)?;
+
+        let current = packed.len();
+        let fits = current <= target;
+        if fits && best.as_ref().is_none_or(|b| current > b.packed.len()) {
+            best = Some(Chosen {
+                raw_len: raw.len(),
+                packed,
+                given: table.given.len(),
+                surnames: table.surname.len(),
+            });
+        }
+        if fits && target - current <= (target as f64 * CLOSE_ENOUGH) as usize {
+            break;
+        }
+
+        // The character model is near-fixed overhead, so scale only the part
+        // of the budget the dictionaries are actually competing for.
+        let overhead = model_size.min(target / 2);
+        let dictionary_now = current.saturating_sub(overhead).max(1);
+        let dictionary_target = target.saturating_sub(overhead).max(1);
+        let scale = (dictionary_target as f64 / dictionary_now as f64).clamp(0.5, 2.0);
+        let next = (((entries as f64) * scale).round() as usize).clamp(100, given_ranked.len());
+        if next == entries {
+            break;
+        }
+        entries = next;
+    }
+
+    let Some(chosen) = best else {
+        eprintln!("no table fits within {target} bytes; raise the target");
+        return Err(std::io::Error::other("target too small"));
+    };
+
+    std::fs::write(out, &chosen.packed)?;
     println!(
-        "given {} entries, surnames {} entries",
-        given.len(),
-        surname.len()
+        "dictionary   {} given names, {} surnames",
+        chosen.given, chosen.surnames
     );
-
-    let table = TableBuilder {
-        given,
-        given_escape,
-        surname,
-        surname_escape,
-        alphabet,
-        chars,
-        prune,
-        check_modulus,
-    }
-    .finish();
-
-    // Verify the table survives serialisation before writing it out, and say
-    // exactly which entry broke if it does not.
-    let bytes = table.write();
-    match namecompress::Table::load(&bytes) {
-        Ok(parsed) => {
-            for (label, before, after) in [
-                ("given", &table.given, &parsed.given),
-                ("surname", &table.surname, &parsed.surname),
-            ] {
-                for i in 0..before.len() as u32 {
-                    if before.name(i) != after.name(i) {
-                        println!(
-                            "{label} entry {i} differs: {:?} -> {:?}",
-                            before.name(i),
-                            after.name(i)
-                        );
-                        break;
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            println!("table does not parse: {e}");
-            for (label, dictionary) in [("given", &table.given), ("surname", &table.surname)] {
-                for i in 0..dictionary.len() as u32 {
-                    let name = dictionary.name(i).expect("in range");
-                    if name.is_empty() || name.bytes().any(|b| b == 0) {
-                        println!("  {label} entry {i} suspicious: {name:?}");
-                    }
-                }
-            }
-        }
-    }
-    std::fs::write(out, &bytes)?;
-    println!("table id {:08x}, {} bytes raw", table.id, bytes.len());
+    println!(
+        "table        {} B {} ({} B raw), target {} B",
+        chosen.packed.len(),
+        packing.name(),
+        chosen.raw_len,
+        target
+    );
     Ok(())
 }

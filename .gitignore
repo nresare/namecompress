@@ -1,0 +1,8 @@
+target/
+*.zip
+*.csv
+
+.tmp/
+tables/
+table.ncmp*
+.DS_Store

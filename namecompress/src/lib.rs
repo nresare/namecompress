@@ -14,8 +14,9 @@
 //! // `Table::parse(&std::fs::read("table.ncmp")?)`.
 //! let alphabet = namecompress::chars::Alphabet::new("abcdefghijklmnopqrstuvwxyz -'".chars().collect())
 //!     .expect("valid alphabet");
-//! let mut chars = CharModelBuilder::new(alphabet.symbols());
-//! chars.train(&alphabet.encode("smith").unwrap(), 100);
+//! let mut builder = CharModelBuilder::new(alphabet.symbols());
+//! builder.train(&alphabet.encode("smith").unwrap(), 100);
+//! let chars = builder.build(0);
 //! let table = TableBuilder {
 //!     given: vec![("John".into(), 500)],
 //!     given_escape: 100,
@@ -23,7 +24,6 @@
 //!     surname_escape: 100,
 //!     alphabet,
 //!     chars,
-//!     prune: 0,
 //!     check_modulus: 256,
 //! }
 //! .finish();

@@ -6,6 +6,7 @@
 mod bench;
 mod build;
 mod corpus;
+mod packing;
 mod cross;
 mod eval;
 mod model;
@@ -96,6 +97,21 @@ fn is_titlecase(s: &str) -> bool {
     }
 }
 
+/// Reads a byte count, accepting `k`, `M` and `G` suffixes as powers of 1024.
+fn parse_size(text: &str) -> Option<usize> {
+    let text = text.trim();
+    let digits = text.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let suffix = text[digits.len()..].to_ascii_lowercase();
+    let scale: usize = match suffix.trim_end_matches('b').trim_end_matches('i') {
+        "" => 1,
+        "k" => 1 << 10,
+        "m" => 1 << 20,
+        "g" => 1 << 30,
+        _ => return None,
+    };
+    digits.trim().parse::<usize>().ok()?.checked_mul(scale)
+}
+
 fn main() -> ExitCode {
     let Some(path) = std::env::args_os().nth(1).map(PathBuf::from) else {
         eprintln!("usage: namecompress-tools <corpus.csv>");
@@ -110,13 +126,19 @@ fn main() -> ExitCode {
     };
 
     if std::env::args().any(|a| a == "--build-table") {
-        let out = arg("--out").unwrap_or_else(|| "table.ncmp".to_owned());
+        let out = arg("--out").unwrap_or_else(|| "table.ncmp.xz".to_owned());
+        let Some(target) = arg("--rough-target-size").as_deref().map(parse_size) else {
+            eprintln!("--build-table requires --rough-target-size, e.g. 200k");
+            return ExitCode::FAILURE;
+        };
+        let Some(target) = target else {
+            eprintln!("could not read --rough-target-size; try 200k, 512KiB or 1M");
+            return ExitCode::FAILURE;
+        };
         if let Err(err) = build::run(
             &path,
             std::path::Path::new(&out),
-            number("--given", 20_000),
-            number("--surnames", 40_000),
-            number("--prune", 16_384) as u32,
+            target,
             number("--check", 16_384) as u32,
         ) {
             eprintln!("build-table: {err}");

@@ -12,8 +12,8 @@ distinct pairs), training on 90% and evaluating on the untouched 10%:
 
 | Method | bytes/name |
 |---|---|
-| **namecompress**, 200KB table, no verification | **4.63** |
-| **namecompress**, 200KB table, 14-bit verification | **6.39** |
+| **namecompress**, 200KB table, no verification | **4.59** |
+| **namecompress**, 200KB table, 14-bit verification | **6.35** |
 | raw UTF-8 | 12.91 |
 | raw deflate (headerless) | 14.87 |
 | brotli q11 | 16.84 |
@@ -78,17 +78,23 @@ contributes fewer distinct names.
 
 ## Table budget
 
-The budget is barely binding — the name distribution's tail is flat enough that
-dictionary entries stop paying for themselves quickly:
+State roughly how large the shipped table may be and the builder works out the
+rest: how much of the budget the character model may take, how hard to prune
+it, and how many dictionary entries fit in what is left. Sizes are measured on
+the actually-compressed table rather than estimated, because compression of
+front-coded names is not linear in the entry count.
 
-```
-  100 KB  ->  4.03 bytes/name        500 KB  ->  3.71
-  200 KB  ->  3.84                  1000 KB  ->  3.65
-  300 KB  ->  3.78                  2000 KB  ->  3.61
-```
+| target | table | pruning | bytes/name |
+|---|---|---|---|
+| 50 KiB | 51,016 | 65536 | 6.78 |
+| 100 KiB | 101,892 | 16384 | 6.54 |
+| **200 KiB** | **203,640** | **4096** | **6.35** |
+| 500 KiB | 493,540 | 1024 | 6.18 |
+| 2 MiB | 2,093,744 | 256 | 6.06 |
 
-(Model entropy, excluding coder termination and the verification symbol.)
-Twenty times the table buys 3%, so 200KB is the recommended operating point.
+The budget is barely binding. Forty times the table buys 11%, because the name
+distribution's tail is flat enough that dictionary entries stop paying for
+themselves quickly, so 200 KiB is the recommended operating point.
 
 ## Wrong-table detection
 
@@ -142,12 +148,28 @@ namecompress: message was coded against a different table
 
 ### Building a table
 
+The only knob is roughly how large the shipped table may be. The output format
+follows the file extension: `.xz`, `.zst`, or uncompressed.
+
 ```
 cargo run --release -p namecompress-tools -- GB.csv --build-table \
-    --given 20000 --surnames 40000 --prune 16384 --check 16384 --out table.ncmp
-zstd -19 table.ncmp
+    --rough-target-size 200k --out table.ncmp.xz
+```
 
-cargo run --release -p namecompress-tools -- GB.csv --bench --table table.ncmp
+```
+alphabet     63 characters, 99.87% character coverage
+model        prune 4096, 50908 B of 51200 B allowance
+dictionary   22943 given names, 45886 surnames
+table        203640 B xz (539544 B raw), target 204800 B
+```
+
+xz is the default because it compresses this table best: front-coded names in
+lexicographic order give it long-range structure that LZMA exploits and BWT
+does not. On the same table bzip2 --best reaches 166,335 bytes and zstd -19
+172,168, against 160,740 for xz.
+
+```
+cargo run --release -p namecompress-tools -- GB.csv --bench --table table.ncmp.xz
 ```
 
 Other tool modes: `--eval` (held-out entropy), `--sweep` (table budget curves),

@@ -14,3 +14,4 @@ path = "src/main.rs"
 namecompress.workspace = true
 clap = { version = "4", features = ["derive"] }
 zstd = "0.13"
+xz2 = "0.1"

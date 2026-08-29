@@ -370,6 +370,19 @@ a foreign message at 1/*M*. At the default *M* = 16384 that is 14 bits, roughly
 rejection measures at 0%, because every symbol carries non-zero probability and
 so every bit string decodes to *some* valid name.
 
+**A modulus of 1 disables the check, and costs nothing.** Narrowing the coder's
+interval to the whole of itself leaves it unchanged, so the symbol consumes no
+bits; `target(1)` is always 0 and `hash % 1` is always 0, so the comparison
+always passes. A decoder needs no special case for it — following §6 as written
+produces the right behaviour — but it must not assume the trailing symbol
+occupies space. Tables built this way carry no protection at all: decoded
+against the wrong table they return a plausible wrong name silently, measured
+at 99.4% of messages. Use it only where the table identity is pinned by
+something outside the message, such as a column type or schema version.
+
+The reference builder takes `--no-wrong-table-check` for this, and reports the
+setting either way in its output.
+
 ## 7. Test vectors
 
 Generated against a raw table built from the GB corpus:

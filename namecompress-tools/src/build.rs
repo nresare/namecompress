@@ -138,6 +138,24 @@ fn take(ranked: &[(String, u64)], distinct: u64, n: usize) -> (Vec<(String, u64)
     (ranked[..n].to_vec(), excluded + distinct)
 }
 
+/// Reports the wrong-table check in words, so the setting is visible in the
+/// build output whichever way it went. Getting this silently wrong is the
+/// failure that matters: a table built without the check looks exactly like
+/// one built with it.
+fn describe_verification(modulus: u32) {
+    if modulus == 1 {
+        println!("verification off, messages carry no wrong-table check");
+        return;
+    }
+    let bits = f64::from(modulus).log2();
+    let bits = if bits.fract() == 0.0 {
+        format!("{bits:.0}")
+    } else {
+        format!("{bits:.2}")
+    };
+    println!("verification {bits} bits per name, modulus {modulus}");
+}
+
 /// Describes what the search settled on.
 struct Chosen {
     packed: Vec<u8>,
@@ -193,6 +211,8 @@ pub fn run(path: &Path, out: &Path, target: usize, check_modulus: u32) -> std::i
             break;
         }
     }
+
+    describe_verification(check_modulus);
 
     let (given_ranked, given_distinct) = rank(&given_groups);
     let (surname_ranked, surname_distinct) = rank(&surname_groups);

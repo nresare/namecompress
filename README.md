@@ -1,11 +1,15 @@
 # namecompress
 
-Compression of personal names against a separately distributed model table.
+A compression algorithm designed to compress a single `Firstname Lastname` as efficiently
+as possible. This is accomplished using an external `table` file that is shared between
+the encoder and decoder. The initial use case for this was
+https://github.com/nresare/digital-membership, a system creating a signed name in a QR code.
+General purpose compression algorithms are almost never efficient for >25 bytes of text,
+so I came up with this design. 
 
 A name is coded as a draw from a known distribution rather than as a string.
-That is the whole idea, and it is why the result is a few bytes where
-general-purpose compressors *expand* the input: at this message size LZ has no
-repetition to exploit and frame overhead alone exceeds the payload.
+This is very efficient for common names, and it is why the result is a few bytes where
+general-purpose compressors *expand* the input.
 
 Measured on the GB slice of the [name-dataset][] corpus (11.5M rows, 6.2M
 distinct pairs), training on 90% and evaluating on the untouched 10%:
@@ -101,9 +105,10 @@ themselves quickly, so 200 KiB is the recommended operating point.
 
 ## Wrong-table detection
 
-Using the wrong table produces plausible but wrong output, and nothing detects
-that for free. The verification symbol costs exactly `log2(M)` bits and bounds
-the chance of accepting a foreign message at `1/M`:
+Decoding a name using a different table than what was used encoding it produces 
+plausible but wrong output, and nothing detects that for free. The verification
+symbol costs exactly `log2(M)` bits and bounds the chance of accepting a 
+foreign message at `1/M`:
 
 | M | bits | bytes/name | measured silent corruption |
 |---|---|---|---|
@@ -112,15 +117,17 @@ the chance of accepting a foreign message at `1/M`:
 | 4096 | 12 | 6.17 | 0.0065% |
 | 16384 | 14 | 6.42 | bounded below 0.0061% |
 
-**Prefer carrying the table identity out of band** — in a column type, schema
-version, or container header — where it costs nothing per message. In-band
-verification is a 38% surcharge.
+If the use case has a mechanism for reliably communicating the table id,
+such that it is very likely that the right table will always be used, the
+table can be built with the `--no-wrong-table-check` and the emitted values
+will be shorter at the cost of silent wrong but plausible looking output
+if the wrong table is used for decoding.
 
 ## Usage
 
 ### Command line
 
-`namecompress` is a filter in the style of `gzip`: a name on standard input
+`namecompress` is a filter in the style of `gzip -c`: a name on standard input
 becomes compressed bytes on standard output, and `-d` reverses that. The table
 may be given raw or zstd-compressed; the format is detected from the file.
 
@@ -152,7 +159,9 @@ namecompress: message was coded against a different table
 ### Building a table
 
 The only knob is roughly how large the shipped table may be. The output format
-follows the file extension: `.xz`, `.zst`, or uncompressed.
+follows the file extension: `.xz`, `.zst`, or uncompressed. The input is expected
+to be comma-separated firstname,lastname one per line. Any additional fields
+are discarded.
 
 ```
 cargo run --release -p namecompress-tools -- GB.csv --build-table \

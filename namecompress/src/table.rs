@@ -56,6 +56,11 @@ impl Dictionary {
     }
 
     fn build(entries: &[(String, u64)], escape_weight: u64) -> Self {
+        // Lexicographic order, so front-coding in `write` has shared prefixes
+        // to exploit. Symbol indices are internal, so any order will do.
+        let mut entries = entries.to_vec();
+        entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let entries = &entries[..];
         let total: u64 = entries.iter().map(|&(_, c)| c).sum::<u64>() + escape_weight;
         // Normalise to FIELD_SCALE with every symbol guaranteed non-zero.
         let mut freqs: Vec<u32> = entries

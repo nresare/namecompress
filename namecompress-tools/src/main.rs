@@ -120,9 +120,6 @@ fn main() -> ExitCode {
     };
 
     let arg = |name: &str| -> Option<String> { std::env::args().skip_while(|a| a != name).nth(1) };
-    let number = |name: &str, default: usize| -> usize {
-        arg(name).and_then(|a| a.parse().ok()).unwrap_or(default)
-    };
 
     if std::env::args().any(|a| a == "--build-table") {
         let out = arg("--out").unwrap_or_else(|| "table.ncmp.xz".to_owned());
@@ -134,12 +131,28 @@ fn main() -> ExitCode {
             eprintln!("could not read --rough-target-size; try 200k, 512KiB or 1M");
             return ExitCode::FAILURE;
         };
-        if let Err(err) = build::run(
-            &path,
-            std::path::Path::new(&out),
-            target,
-            number("--check", 16_384) as u32,
-        ) {
+        // The wrong-table check is a table-wide setting, so it is chosen
+        // here rather than per message. A modulus of 1 disables it outright
+        // and costs nothing, which `--no-wrong-table-check` says out loud.
+        let disabled = std::env::args().any(|a| a == "--no-wrong-table-check");
+        let explicit = arg("--check").and_then(|a| a.parse::<u32>().ok());
+        let check = match (disabled, explicit) {
+            (true, Some(modulus)) if modulus != 1 => {
+                eprintln!("--no-wrong-table-check contradicts --check {modulus}");
+                return ExitCode::FAILURE;
+            }
+            (true, _) => 1,
+            (false, Some(modulus)) => modulus,
+            (false, None) => 16_384,
+        };
+        // The modulus is stored as a u16, and a larger value would be
+        // truncated on the way out, leaving encoder and decoder disagreeing.
+        if check == 0 || check > u32::from(u16::MAX) {
+            eprintln!("--check must be between 1 and {}", u16::MAX);
+            return ExitCode::FAILURE;
+        }
+
+        if let Err(err) = build::run(&path, std::path::Path::new(&out), target, check) {
             eprintln!("build-table: {err}");
             return ExitCode::FAILURE;
         }

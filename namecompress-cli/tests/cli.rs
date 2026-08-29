@@ -10,15 +10,19 @@ use namecompress::{Table, TableBuilder};
 const BINARY: &str = env!("CARGO_BIN_EXE_namecompress");
 
 fn build_table(check_modulus: u32, surname: &str) -> Table {
-    let mut chars = CharModelBuilder::new();
+    let alphabet =
+        namecompress::chars::Alphabet::new("abcdefghijklmnopqrstuvwxyzåäö -'".chars().collect())
+            .expect("valid alphabet");
+    let mut chars = CharModelBuilder::new(alphabet.symbols());
     for name in ["smith", "jones", "okonkwo", "anna-karin"] {
-        chars.train(&namecompress::chars::encode(name).expect("in alphabet"), 100);
+        chars.train(&alphabet.encode(name).expect("in alphabet"), 100);
     }
     TableBuilder {
         given: vec![("John".into(), 5000), ("Sarah".into(), 3000)],
         given_escape: 900,
         surname: vec![(surname.into(), 4000), ("Jones".into(), 2000)],
         surname_escape: 900,
+        alphabet,
         chars,
         prune: 0,
         check_modulus,

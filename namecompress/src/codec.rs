@@ -5,7 +5,7 @@
 //! whichever is shorter, so the raw path bounds the worst case at roughly the
 //! input length regardless of how strange the name is.
 
-use crate::chars::{self, TERMINATOR};
+use crate::chars;
 use crate::range::{Decoder, Encoder};
 use crate::table::{Dictionary, FIELD_SCALE, Table};
 
@@ -135,7 +135,7 @@ fn encode_field(
         None => {
             let folded = name.to_lowercase();
             let shape = derive_shape(&folded, name)?;
-            let symbols = chars::encode(&folded)?;
+            let symbols = table.alphabet.encode(&folded)?;
             if symbols.len() > MAX_FIELD_CHARS {
                 return None;
             }
@@ -184,12 +184,12 @@ fn decode_field(
             }
             let (symbol, start, size) = symbol.ok_or(Error::Malformed)?;
             decoder.advance(start, size, chars::SCALE);
-            if symbol == TERMINATOR {
+            if symbol == table.alphabet.terminator() {
                 break;
             }
             history.push(symbol);
         }
-        chars::decode(&history)
+        table.alphabet.decode(&history).ok_or(Error::Malformed)?
     } else {
         dictionary
             .name(symbol)
@@ -295,9 +295,12 @@ mod tests {
     use crate::table::{Table, TableBuilder};
 
     fn table() -> Table {
-        let mut chars = CharModelBuilder::new();
+        let alphabet =
+            crate::chars::Alphabet::new("abcdefghijklmnopqrstuvwxyzåäö -'".chars().collect())
+                .expect("valid alphabet");
+        let mut chars = CharModelBuilder::new(alphabet.symbols());
         for name in ["smith", "jones", "brown", "o'brien", "anna-karin", "nkemdirim"] {
-            chars.train(&crate::chars::encode(name).expect("in alphabet"), 100);
+            chars.train(&alphabet.encode(name).expect("in alphabet"), 100);
         }
         TableBuilder {
             given: vec![
@@ -308,6 +311,7 @@ mod tests {
             given_escape: 900,
             surname: vec![("Smith".into(), 4000), ("Jones".into(), 2000)],
             surname_escape: 900,
+            alphabet,
             chars,
             prune: 0,
             check_modulus: 256,

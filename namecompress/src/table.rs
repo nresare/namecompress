@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::chars::{CharModel, CharModelBuilder};
+use crate::chars::{Alphabet, CharModel, CharModelBuilder};
 use crate::varint;
 
 const MAGIC: &[u8; 4] = b"NCMP";
@@ -190,6 +190,9 @@ impl Dictionary {
 pub struct Table {
     pub given: Dictionary,
     pub surname: Dictionary,
+    /// The characters this table's model covers. Names using anything else
+    /// take the raw fallback.
+    pub alphabet: Alphabet,
     pub chars: CharModel,
     /// Modulus of the verification symbol. Larger values cost
     /// `log2(modulus)` bits per message and reduce the chance that a message
@@ -228,12 +231,16 @@ impl Table {
             return Err("check modulus must be non-zero");
         }
 
-        let given = Dictionary::parse(bytes, &mut cursor).map_err(|e| e)?;
-        let surname = Dictionary::parse(bytes, &mut cursor).map_err(|e| e)?;
-        let chars = CharModel::parse(bytes, &mut cursor).ok_or("character model")?;
+        // The alphabet precedes the model, which needs its size to parse.
+        let alphabet = Alphabet::parse(bytes, &mut cursor).ok_or("alphabet")?;
+        let given = Dictionary::parse(bytes, &mut cursor)?;
+        let surname = Dictionary::parse(bytes, &mut cursor)?;
+        let chars =
+            CharModel::parse(bytes, &mut cursor, alphabet.symbols()).ok_or("character model")?;
         Ok(Self {
             given,
             surname,
+            alphabet,
             chars,
             check_modulus,
             id,
@@ -246,6 +253,7 @@ impl Table {
         out.extend_from_slice(&VERSION.to_le_bytes());
         out.extend_from_slice(&(self.check_modulus as u16).to_le_bytes());
         out.extend_from_slice(&self.id.to_le_bytes());
+        self.alphabet.write(&mut out);
         self.given.write(&mut out);
         self.surname.write(&mut out);
         self.chars.write(&mut out);
@@ -259,6 +267,7 @@ pub struct TableBuilder {
     pub given_escape: u64,
     pub surname: Vec<(String, u64)>,
     pub surname_escape: u64,
+    pub alphabet: Alphabet,
     pub chars: CharModelBuilder,
     pub prune: u32,
     pub check_modulus: u32,
@@ -272,6 +281,7 @@ impl TableBuilder {
         let mut table = Table {
             given,
             surname,
+            alphabet: self.alphabet,
             chars,
             check_modulus: self.check_modulus,
             id: 0,
@@ -289,9 +299,11 @@ mod tests {
     use crate::chars::CharModelBuilder;
 
     fn sample_table() -> Table {
-        let mut chars = CharModelBuilder::new();
+        let alphabet = Alphabet::new("abcdefghijklmnopqrstuvwxyzåäö -'".chars().collect())
+            .expect("valid alphabet");
+        let mut chars = CharModelBuilder::new(alphabet.symbols());
         for name in ["smith", "jones", "o'brien", "anna-karin", "wangari"] {
-            chars.train(&crate::chars::encode(name).expect("in alphabet"), 100);
+            chars.train(&alphabet.encode(name).expect("in alphabet"), 100);
         }
         TableBuilder {
             given: vec![
@@ -303,6 +315,7 @@ mod tests {
             given_escape: 100,
             surname: vec![("Smith".into(), 400), ("Ó Súilleabháin".into(), 20)],
             surname_escape: 100,
+            alphabet,
             chars,
             prune: 0,
             check_modulus: 256,

@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use namecompress::chars::CharModelBuilder;
+use namecompress::chars::{Alphabet, CharModelBuilder, MAX_SYMBOLS};
 use namecompress::codec::derive_shape;
 use namecompress::table::TableBuilder;
 
@@ -32,6 +32,11 @@ impl Group {
             .expect("group is non-empty")
     }
 
+    /// Total occurrences across all spellings.
+    fn total(&self) -> u64 {
+        self.variants.values().sum()
+    }
+
     /// Occurrences the dictionary entry can actually represent: those whose
     /// spelling is reachable from the canonical form by a shape.
     fn representable(&self) -> u64 {
@@ -51,6 +56,42 @@ fn fold(groups: &mut HashMap<String, Group>, name: &str) {
         .variants
         .entry(name.to_owned())
         .or_insert(0) += 1;
+}
+
+/// Chooses the alphabet from the characters the corpus actually uses,
+/// weighted by how often they occur. One symbol is reserved for the
+/// terminator, and anything that does not fit is left to the raw fallback.
+fn derive_alphabet(groups: &[&HashMap<String, Group>]) -> (Alphabet, f64) {
+    let mut weights: HashMap<char, u64> = HashMap::new();
+    let mut total = 0u64;
+    for set in groups {
+        for (folded, group) in *set {
+            let count = group.total();
+            total += count * folded.chars().count() as u64;
+            for c in folded.chars() {
+                *weights.entry(c).or_insert(0) += count;
+            }
+        }
+    }
+
+    let mut ranked: Vec<(char, u64)> = weights.into_iter().collect();
+    ranked.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ranked.truncate(MAX_SYMBOLS - 1);
+
+    let covered: u64 = ranked.iter().map(|&(_, c)| c).sum();
+    // A stable, readable ordering; symbol indices themselves are arbitrary.
+    let mut characters: Vec<char> = ranked.into_iter().map(|(c, _)| c).collect();
+    characters.sort_unstable();
+
+    let coverage = if total == 0 {
+        0.0
+    } else {
+        covered as f64 / total as f64
+    };
+    (
+        Alphabet::new(characters).expect("alphabet is non-empty and within range"),
+        coverage,
+    )
 }
 
 /// Selects the `n` most frequent groups as dictionary entries, returning them
@@ -80,7 +121,6 @@ pub fn run(
 ) -> std::io::Result<()> {
     let mut given_groups: HashMap<String, Group> = HashMap::new();
     let mut surname_groups: HashMap<String, Group> = HashMap::new();
-    let mut chars = CharModelBuilder::new();
 
     for (index, record) in corpus::read(path)?.enumerate() {
         if index as u64 % TEST_MODULUS == 0 {
@@ -88,9 +128,24 @@ pub fn run(
         }
         fold(&mut given_groups, &record.first);
         fold(&mut surname_groups, &record.last);
-        for name in [&record.first, &record.last] {
-            if let Some(symbols) = namecompress::chars::encode(&name.to_lowercase()) {
-                chars.train(&symbols, 1);
+    }
+
+    let (alphabet, coverage) = derive_alphabet(&[&given_groups, &surname_groups]);
+    println!(
+        "alphabet {} characters, covering {:.3}% of characters written: {}",
+        alphabet.characters().len(),
+        100.0 * coverage,
+        alphabet.characters().iter().collect::<String>()
+    );
+
+    // The folded groups already carry occurrence counts, so the character
+    // model can be trained from them rather than by rereading the corpus.
+    let mut chars = CharModelBuilder::new(alphabet.symbols());
+    for set in [&given_groups, &surname_groups] {
+        for (folded, group) in set {
+            if let Some(symbols) = alphabet.encode(folded) {
+                let weight = u32::try_from(group.total()).unwrap_or(u32::MAX);
+                chars.train(&symbols, weight);
             }
         }
     }
@@ -108,6 +163,7 @@ pub fn run(
         given_escape,
         surname,
         surname_escape,
+        alphabet,
         chars,
         prune,
         check_modulus,

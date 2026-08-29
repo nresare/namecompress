@@ -1,147 +1,198 @@
-//! Order-3 character model over a 32-symbol alphabet.
+//! Order-3 character model over a table-defined alphabet.
+//!
+//! The alphabet is carried by the table rather than fixed in the code, so a
+//! Swedish table covers `å ä ö` and a Polish one `ł ą ę`. A name using a
+//! character the table does not know is not modelled at all; the codec falls
+//! back to raw UTF-8 for it.
 //!
 //! Probabilities are Witten-Bell interpolated across orders. The blend is done
-//! in fixed-point integer arithmetic rather than floating point: the encoder
-//! and decoder must derive bit-identical frequency tables, and float results
-//! are not guaranteed reproducible across platforms or optimisation levels.
+//! in fixed-point integer arithmetic rather than floating point: encoder and
+//! decoder must derive bit-identical frequency tables, and float results are
+//! not guaranteed reproducible across platforms or optimisation levels.
+
+use std::collections::HashMap;
 
 use crate::varint;
 
-pub const ALPHABET: usize = 32;
-pub const TERMINATOR: u8 = 26;
-const HYPHEN: u8 = 27;
-const SPACE: u8 = 28;
-const APOSTROPHE: u8 = 29;
+/// Bits per symbol in a packed context. Six admits alphabets large enough for
+/// European orthographies; contexts are stored sparsely, so the wider packing
+/// costs nothing for a small alphabet.
+const CONTEXT_BITS: u32 = 6;
+
+/// Most symbols an alphabet may hold, terminator included.
+pub const MAX_SYMBOLS: usize = 1 << CONTEXT_BITS;
 
 /// Denominator of the fixed-point probabilities handed to the coder.
 pub const SCALE: u32 = 1 << 16;
+
 const MAX_ORDER: usize = 3;
 
-/// Maps a name to alphabet symbols, terminator included. `None` if the name
-/// uses characters outside the alphabet, in which case the caller must take
-/// the raw fallback.
-pub fn encode(name: &str) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(name.len() + 1);
-    for c in name.chars() {
-        out.push(match c {
-            'a'..='z' => c as u8 - b'a',
-            '-' => HYPHEN,
-            ' ' => SPACE,
-            '\'' => APOSTROPHE,
-            _ => return None,
-        });
-    }
-    out.push(TERMINATOR);
-    Some(out)
+/// The characters a table can model, plus an implicit terminator whose symbol
+/// is `characters.len()`.
+pub struct Alphabet {
+    characters: Vec<char>,
+    lookup: HashMap<char, u8>,
 }
 
-/// Maps alphabet symbols back to text. The terminator is not included.
-pub fn decode(symbols: &[u8]) -> String {
-    symbols
-        .iter()
-        .map(|&s| match s {
-            0..=25 => (b'a' + s) as char,
-            HYPHEN => '-',
-            SPACE => ' ',
-            APOSTROPHE => '\'',
-            _ => '\u{fffd}',
-        })
-        .collect()
+impl Alphabet {
+    /// Builds an alphabet, rejecting duplicates and oversized sets. One slot
+    /// is reserved for the terminator.
+    pub fn new(characters: Vec<char>) -> Option<Self> {
+        if characters.is_empty() || characters.len() >= MAX_SYMBOLS {
+            return None;
+        }
+        let mut lookup = HashMap::with_capacity(characters.len());
+        for (index, &c) in characters.iter().enumerate() {
+            if lookup.insert(c, index as u8).is_some() {
+                return None;
+            }
+        }
+        Some(Self { characters, lookup })
+    }
+
+    /// Symbol count including the terminator.
+    pub fn symbols(&self) -> usize {
+        self.characters.len() + 1
+    }
+
+    pub fn terminator(&self) -> u8 {
+        self.characters.len() as u8
+    }
+
+    pub fn characters(&self) -> &[char] {
+        &self.characters
+    }
+
+    /// Maps a name to symbols, terminator included. `None` if the name uses a
+    /// character outside this alphabet.
+    pub fn encode(&self, name: &str) -> Option<Vec<u8>> {
+        let mut out = Vec::with_capacity(name.len() + 1);
+        for c in name.chars() {
+            out.push(*self.lookup.get(&c)?);
+        }
+        out.push(self.terminator());
+        Some(out)
+    }
+
+    /// Maps symbols back to text. The terminator must not be included.
+    pub fn decode(&self, symbols: &[u8]) -> Option<String> {
+        symbols
+            .iter()
+            .map(|&s| self.characters.get(s as usize).copied())
+            .collect()
+    }
+
+    pub fn write(&self, out: &mut Vec<u8>) {
+        varint::push(out, self.characters.len() as u64);
+        for &c in &self.characters {
+            varint::push(out, u32::from(c) as u64);
+        }
+    }
+
+    pub fn parse(bytes: &[u8], cursor: &mut usize) -> Option<Self> {
+        let count = varint::read(bytes, cursor)?;
+        let mut characters = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let scalar = u32::try_from(varint::read(bytes, cursor)?).ok()?;
+            characters.push(char::from_u32(scalar)?);
+        }
+        Self::new(characters)
+    }
 }
 
 /// One context's quantised counts, as stored in the table.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct Context {
-    counts: [u8; ALPHABET],
+    counts: Vec<u8>,
     total: u32,
     distinct: u32,
 }
 
 pub struct CharModel {
-    /// Per order, a sparse map from packed context to its counts.
-    orders: Vec<Vec<Option<Box<Context>>>>,
+    symbols: usize,
+    /// Per order, a sparse map from packed context to its counts. Contexts are
+    /// sparse by nature and a dense table would be gigabytes at this alphabet
+    /// width.
+    orders: Vec<HashMap<u32, Context>>,
 }
 
 impl CharModel {
-    /// Parses the character-model section of a table.
-    pub fn parse(bytes: &[u8], cursor: &mut usize) -> Option<Self> {
+    pub fn parse(bytes: &[u8], cursor: &mut usize, symbols: usize) -> Option<Self> {
+        if symbols > MAX_SYMBOLS {
+            return None;
+        }
         let mut orders = Vec::with_capacity(MAX_ORDER + 1);
-        for order in 0..=MAX_ORDER {
-            let slots = 1usize << (5 * order);
-            let mut table: Vec<Option<Box<Context>>> = vec![None; slots];
+        for _ in 0..=MAX_ORDER {
             let count = varint::read(bytes, cursor)?;
-            let mut ctx = 0usize;
+            let mut table = HashMap::with_capacity(count as usize);
+            let mut context = 0u32;
             for _ in 0..count {
-                ctx += varint::read(bytes, cursor)? as usize;
-                if ctx >= slots {
-                    return None;
-                }
-                let symbols = varint::read(bytes, cursor)?;
-                let mut entry = Context::default();
-                for _ in 0..symbols {
-                    let sym = *bytes.get(*cursor)? as usize;
-                    let freq = *bytes.get(*cursor + 1)?;
+                context = context.checked_add(u32::try_from(varint::read(bytes, cursor)?).ok()?)?;
+                let present = varint::read(bytes, cursor)?;
+                let mut entry = Context {
+                    counts: vec![0; symbols],
+                    total: 0,
+                    distinct: 0,
+                };
+                for _ in 0..present {
+                    let symbol = *bytes.get(*cursor)? as usize;
+                    let frequency = *bytes.get(*cursor + 1)?;
                     *cursor += 2;
-                    if sym >= ALPHABET || freq == 0 {
+                    if symbol >= symbols || frequency == 0 {
                         return None;
                     }
-                    entry.counts[sym] = freq;
-                    entry.total += u32::from(freq);
+                    entry.counts[symbol] = frequency;
+                    entry.total += u32::from(frequency);
                     entry.distinct += 1;
                 }
-                table[ctx] = Some(Box::new(entry));
+                if table.insert(context, entry).is_some() {
+                    return None;
+                }
             }
             orders.push(table);
         }
-        Some(Self { orders })
+        Some(Self { symbols, orders })
     }
 
-    /// Serialises to the table format.
     pub fn write(&self, out: &mut Vec<u8>) {
-        for order in 0..=MAX_ORDER {
-            let present: Vec<usize> = self.orders[order]
-                .iter()
-                .enumerate()
-                .filter_map(|(i, c)| c.as_ref().map(|_| i))
-                .collect();
-            varint::push(out, present.len() as u64);
-            let mut previous = 0usize;
-            for ctx in present {
-                varint::push(out, (ctx - previous) as u64);
-                previous = ctx;
-                let entry = self.orders[order][ctx].as_ref().expect("present");
-                let symbols: Vec<usize> = (0..ALPHABET)
+        for order in &self.orders {
+            let mut contexts: Vec<u32> = order.keys().copied().collect();
+            contexts.sort_unstable();
+            varint::push(out, contexts.len() as u64);
+            let mut previous = 0u32;
+            for context in contexts {
+                varint::push(out, u64::from(context - previous));
+                previous = context;
+                let entry = &order[&context];
+                let present: Vec<usize> = (0..self.symbols)
                     .filter(|&s| entry.counts[s] > 0)
                     .collect();
-                varint::push(out, symbols.len() as u64);
-                for s in symbols {
-                    out.push(s as u8);
-                    out.push(entry.counts[s]);
+                varint::push(out, present.len() as u64);
+                for symbol in present {
+                    out.push(symbol as u8);
+                    out.push(entry.counts[symbol]);
                 }
             }
         }
     }
 
-    /// Builds the frequency table for the symbol following `history`.
-    ///
-    /// Every entry is at least 1 so any string remains codable, and the
-    /// entries sum to exactly [`SCALE`].
-    pub fn distribution(&self, history: &[u8]) -> [u32; ALPHABET] {
-        // Order 0 blends against a uniform base.
-        let mut probabilities = [SCALE / ALPHABET as u32; ALPHABET];
+    /// Frequency table for the symbol following `history`. Every entry is at
+    /// least 1 so any string stays codable, and the entries sum to [`SCALE`].
+    pub fn distribution(&self, history: &[u8]) -> Vec<u32> {
+        let uniform = SCALE / self.symbols as u32;
+        let mut probabilities = vec![uniform; self.symbols];
         let available = history.len().min(MAX_ORDER);
         for order in 0..=available {
-            let ctx = pack(&history[history.len() - order..]);
-            let Some(entry) = self.orders[order][ctx].as_ref() else {
+            let context = pack(&history[history.len() - order..]);
+            let Some(entry) = self.orders[order].get(&context) else {
                 continue;
             };
             let denominator = u64::from(entry.total + entry.distinct);
-            for (sym, slot) in probabilities.iter_mut().enumerate() {
-                let count = u64::from(entry.counts[sym]);
+            for (symbol, slot) in probabilities.iter_mut().enumerate() {
+                let count = u64::from(entry.counts[symbol]);
                 let lower = u64::from(*slot);
-                let blended = (count * u64::from(SCALE) + u64::from(entry.distinct) * lower)
-                    / denominator;
-                *slot = blended as u32;
+                *slot = ((count * u64::from(SCALE) + u64::from(entry.distinct) * lower)
+                    / denominator) as u32;
             }
             normalise(&mut probabilities);
         }
@@ -149,8 +200,8 @@ impl CharModel {
     }
 }
 
-/// Forces every entry to be non-zero and the total to be exactly [`SCALE`].
-fn normalise(probabilities: &mut [u32; ALPHABET]) {
+/// Forces every entry non-zero and the total to be exactly [`SCALE`].
+fn normalise(probabilities: &mut [u32]) {
     let mut total = 0u32;
     for slot in probabilities.iter_mut() {
         *slot = (*slot).max(1);
@@ -166,69 +217,70 @@ fn normalise(probabilities: &mut [u32; ALPHABET]) {
     probabilities[largest] = probabilities[largest] + SCALE - total;
 }
 
-/// Packs up to [`MAX_ORDER`] symbols into a context index, 5 bits each.
-fn pack(symbols: &[u8]) -> usize {
+/// Packs up to [`MAX_ORDER`] symbols into a context key.
+fn pack(symbols: &[u8]) -> u32 {
     symbols
         .iter()
-        .fold(0usize, |acc, &s| (acc << 5) | s as usize)
+        .fold(0u32, |acc, &s| (acc << CONTEXT_BITS) | u32::from(s))
 }
 
 /// Build-time accumulator, used by the table generator.
-#[derive(Default)]
 pub struct CharModelBuilder {
-    counts: Vec<Vec<u32>>,
-    totals: Vec<Vec<u32>>,
+    symbols: usize,
+    orders: Vec<HashMap<u32, Vec<u32>>>,
 }
 
 impl CharModelBuilder {
-    pub fn new() -> Self {
-        let mut counts = Vec::new();
-        let mut totals = Vec::new();
-        for order in 0..=MAX_ORDER {
-            let slots = 1usize << (5 * order);
-            counts.push(vec![0u32; slots * ALPHABET]);
-            totals.push(vec![0u32; slots]);
+    pub fn new(symbols: usize) -> Self {
+        Self {
+            symbols,
+            orders: (0..=MAX_ORDER).map(|_| HashMap::new()).collect(),
         }
-        Self { counts, totals }
     }
 
     pub fn train(&mut self, symbols: &[u8], weight: u32) {
-        for (i, &sym) in symbols.iter().enumerate() {
+        for (i, &symbol) in symbols.iter().enumerate() {
             for order in 0..=MAX_ORDER.min(i) {
-                let ctx = pack(&symbols[i - order..i]);
-                self.counts[order][ctx * ALPHABET + sym as usize] += weight;
-                self.totals[order][ctx] += weight;
+                let context = pack(&symbols[i - order..i]);
+                self.orders[order]
+                    .entry(context)
+                    .or_insert_with(|| vec![0; self.symbols])[symbol as usize] += weight;
             }
         }
     }
 
     /// Drops thinly-observed contexts and quantises the rest to 8 bits.
     pub fn finish(self, prune: u32) -> CharModel {
-        let mut orders = Vec::new();
-        for order in 0..=MAX_ORDER {
-            let slots = 1usize << (5 * order);
-            let mut table: Vec<Option<Box<Context>>> = vec![None; slots];
-            for ctx in 0..slots {
-                let total = self.totals[order][ctx];
+        let mut orders = Vec::with_capacity(MAX_ORDER + 1);
+        for (order, counts) in self.orders.into_iter().enumerate() {
+            let mut table = HashMap::new();
+            for (context, row) in counts {
+                let total: u32 = row.iter().sum();
                 if total == 0 || (order > 0 && total < prune) {
                     continue;
                 }
-                let row = &self.counts[order][ctx * ALPHABET..(ctx + 1) * ALPHABET];
-                let mut entry = Context::default();
-                for (sym, &count) in row.iter().enumerate() {
+                let mut entry = Context {
+                    counts: vec![0; self.symbols],
+                    total: 0,
+                    distinct: 0,
+                };
+                for (symbol, &count) in row.iter().enumerate() {
                     if count == 0 {
                         continue;
                     }
                     // Never quantise an observed symbol away entirely.
-                    let q = ((u64::from(count) * 255) / u64::from(total)).max(1).min(255);
-                    entry.counts[sym] = q as u8;
-                    entry.total += q as u32;
+                    let q = ((u64::from(count) * 255) / u64::from(total)).clamp(1, 255) as u8;
+                    entry.counts[symbol] = q;
+                    entry.total += u32::from(q);
                     entry.distinct += 1;
                 }
-                table[ctx] = Some(Box::new(entry));
+                table.insert(context, entry);
             }
             orders.push(table);
         }
-        CharModel { orders }
+        CharModel {
+            symbols: self.symbols,
+            orders,
+        }
     }
 }

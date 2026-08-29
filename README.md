@@ -12,8 +12,8 @@ distinct pairs), training on 90% and evaluating on the untouched 10%:
 
 | Method | bytes/name |
 |---|---|
-| **namecompress**, 200KB table, no verification | **4.66** |
-| **namecompress**, 200KB table, 14-bit verification | **6.42** |
+| **namecompress**, 200KB table, no verification | **4.63** |
+| **namecompress**, 200KB table, 14-bit verification | **6.39** |
 | raw UTF-8 | 12.91 |
 | raw deflate (headerless) | 14.87 |
 | brotli q11 | 16.84 |
@@ -37,6 +37,10 @@ then a verification symbol.
 - **Order-3 character model** for escaped names, Witten-Bell interpolated. The
   blend is computed in fixed-point integer arithmetic, not floating point, so
   encoder and decoder derive bit-identical frequency tables on every platform.
+- **Table-defined alphabet.** The characters the model covers are carried by
+  the table, derived from its own corpus, so a Swedish table gets `å ä ö` and
+  a Polish one `ł ą ę`. Hardcoding `a-z` would silently assume English
+  orthography and push a fifth of Swedish names onto the raw fallback.
 - **Case shapes.** Dictionary entries are canonical spellings; `SMITH`,
   `Smith`, and `smith` share one entry and pool their counts, with a shape
   symbol recovering the original.
@@ -53,6 +57,24 @@ Two things measurement ruled *out* of the design:
 - **No reliance on structural corruption detection.** Measured at 0%. Every
   symbol has non-zero probability, so every bit string decodes to *some* valid
   name. A near-optimal code has no redundancy left to detect errors with.
+
+## Tables are per-geography
+
+A table is only as good as the corpus behind it. Against the GB slice of the
+same dataset, on identical held-out rows:
+
+| | GB names | SE names |
+|---|---|---|
+| GB table | **6.39 B** (2.02x) | 9.92 B (1.45x) |
+| SE table | — | **6.89 B** (2.09x) |
+
+Using the wrong table costs about 55% and is still perfectly correct: the raw
+fallback absorbs whatever the model cannot represent, and no round trip fails.
+
+Swedish beats British slightly once it has its own table, because Swedish names
+are longer (14.40 against 12.91 raw bytes) and no less predictable. Note also
+that the SE table is smaller — 168 KiB against 208 KiB — since Sweden
+contributes fewer distinct names.
 
 ## Table budget
 

@@ -12,13 +12,16 @@
 //!
 //! // In practice the table is built offline and loaded with
 //! // `Table::parse(&std::fs::read("table.ncmp")?)`.
-//! let mut chars = CharModelBuilder::new();
-//! chars.train(&namecompress::chars::encode("smith").unwrap(), 100);
+//! let alphabet = namecompress::chars::Alphabet::new("abcdefghijklmnopqrstuvwxyz -'".chars().collect())
+//!     .expect("valid alphabet");
+//! let mut chars = CharModelBuilder::new(alphabet.symbols());
+//! chars.train(&alphabet.encode("smith").unwrap(), 100);
 //! let table = TableBuilder {
 //!     given: vec![("John".into(), 500)],
 //!     given_escape: 100,
 //!     surname: vec![("Smith".into(), 400)],
 //!     surname_escape: 100,
+//!     alphabet,
 //!     chars,
 //!     prune: 0,
 //!     check_modulus: 256,

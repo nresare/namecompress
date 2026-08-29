@@ -174,11 +174,11 @@ dependencies = [
 
 [[package]]
 name = "namecompress"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "namecompress-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "namecompress",
@@ -188,7 +188,7 @@ dependencies = [
 
 [[package]]
 name = "namecompress-tools"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "namecompress",
  "xz2",

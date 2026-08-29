@@ -13,9 +13,17 @@ use crate::corpus;
 use crate::model::{CharModel, encode_chars};
 use crate::stats::Interner;
 
-const TEST_MODULUS: u64 = 10;
 const GRID: [usize; 10] = [
-    1_000, 2_000, 5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 320_000, usize::MAX,
+    1_000,
+    2_000,
+    5_000,
+    10_000,
+    20_000,
+    40_000,
+    80_000,
+    160_000,
+    320_000,
+    usize::MAX,
 ];
 
 /// Coding cost of one field under a dictionary capped at `n` entries.
@@ -138,7 +146,7 @@ pub fn run(path: &Path, out_dir: &Path, prune: u32) -> std::io::Result<()> {
     let mut chars = CharModel::new();
 
     for (index, record) in corpus::read(path)?.enumerate() {
-        if index as u64 % TEST_MODULUS == 0 {
+        if crate::split::is_held_out(index) {
             continue;
         }
         firsts.observe(&record.first);
@@ -166,7 +174,7 @@ pub fn run(path: &Path, out_dir: &Path, prune: u32) -> std::io::Result<()> {
     let mut rows = 0u64;
 
     for (index, record) in corpus::read(path)?.enumerate() {
-        if index as u64 % TEST_MODULUS != 0 {
+        if !crate::split::is_held_out(index) {
             continue;
         }
         rows += 1;

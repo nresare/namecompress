@@ -6,10 +6,11 @@
 mod bench;
 mod build;
 mod corpus;
-mod packing;
 mod cross;
 mod eval;
 mod model;
+mod packing;
+mod split;
 mod stats;
 mod sweep;
 
@@ -118,9 +119,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let arg = |name: &str| -> Option<String> {
-        std::env::args().skip_while(|a| a != name).nth(1)
-    };
+    let arg = |name: &str| -> Option<String> { std::env::args().skip_while(|a| a != name).nth(1) };
     let number = |name: &str, default: usize| -> usize {
         arg(name).and_then(|a| a.parse().ok()).unwrap_or(default)
     };

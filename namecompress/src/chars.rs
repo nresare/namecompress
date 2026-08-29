@@ -166,9 +166,8 @@ impl CharModel {
                 varint::push(out, u64::from(context - previous));
                 previous = context;
                 let entry = &order[&context];
-                let present: Vec<usize> = (0..self.symbols)
-                    .filter(|&s| entry.counts[s] > 0)
-                    .collect();
+                let present: Vec<usize> =
+                    (0..self.symbols).filter(|&s| entry.counts[s] > 0).collect();
                 varint::push(out, present.len() as u64);
                 for symbol in present {
                     out.push(symbol as u8);

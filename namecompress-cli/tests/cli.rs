@@ -93,8 +93,11 @@ fn writes_raw_bytes_not_text() {
     let path = write_table(directory, "raw.ncmp", &build_table(16_384, "Smith"), false);
     let path = path.to_str().expect("utf-8 path");
 
-    let (ok, packed, err) = run(&["-t", path], b"John Smith
-");
+    let (ok, packed, err) = run(
+        &["-t", path],
+        b"John Smith
+",
+    );
     assert!(ok, "compress: {err}");
     // A common name must land in a handful of bytes, which also rules out any
     // textual encoding of the output.
@@ -110,7 +113,12 @@ fn writes_raw_bytes_not_text() {
 fn reports_a_mismatched_table() {
     let directory = Path::new(env!("CARGO_TARGET_TMPDIR"));
     let mine = write_table(directory, "mine.ncmp", &build_table(16_384, "Smith"), false);
-    let other = write_table(directory, "other.ncmp", &build_table(16_384, "Brown"), false);
+    let other = write_table(
+        directory,
+        "other.ncmp",
+        &build_table(16_384, "Brown"),
+        false,
+    );
 
     let (ok, packed, _) = run(&["-t", mine.to_str().unwrap()], b"John Smith");
     assert!(ok);

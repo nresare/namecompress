@@ -5,8 +5,6 @@ use std::path::Path;
 
 use crate::corpus;
 
-const TEST_MODULUS: u64 = 10;
-
 pub fn run(corpus_path: &Path, table_path: &Path) -> std::io::Result<()> {
     let table = crate::packing::read_table(table_path)?;
 
@@ -17,7 +15,7 @@ pub fn run(corpus_path: &Path, table_path: &Path) -> std::io::Result<()> {
     let mut histogram = [0u64; 16];
 
     for (index, record) in corpus::read(corpus_path)?.enumerate() {
-        if index as u64 % TEST_MODULUS != 0 {
+        if !crate::split::is_held_out(index) {
             continue;
         }
         let name = format!("{} {}", record.first, record.last);
@@ -41,7 +39,10 @@ pub fn run(corpus_path: &Path, table_path: &Path) -> std::io::Result<()> {
     let rows_f = rows as f64;
     println!("held-out names        {rows}");
     println!("round-trip failures   {failures}");
-    println!("mean raw UTF-8        {:.3} bytes", raw_bytes as f64 / rows_f);
+    println!(
+        "mean raw UTF-8        {:.3} bytes",
+        raw_bytes as f64 / rows_f
+    );
     println!(
         "mean compressed       {:.3} bytes",
         packed_bytes as f64 / rows_f
@@ -53,10 +54,7 @@ pub fn run(corpus_path: &Path, table_path: &Path) -> std::io::Result<()> {
     println!("\nsize distribution:");
     for (size, &count) in histogram.iter().enumerate() {
         if count > 0 {
-            println!(
-                "  {size:>2} bytes  {:>6.2}%",
-                100.0 * count as f64 / rows_f
-            );
+            println!("  {size:>2} bytes  {:>6.2}%", 100.0 * count as f64 / rows_f);
         }
     }
     Ok(())

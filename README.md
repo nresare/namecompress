@@ -24,6 +24,9 @@ Round-trip is exact: zero failures over 1,149,425 held-out names.
 
 [name-dataset]: https://github.com/philipperemy/name-dataset
 
+The byte-level format is specified in [FORMAT.md](FORMAT.md), which is enough
+to write a decoder in another language without reading this one.
+
 ## Design
 
 Decode order is: mode symbol, then either two name fields or a raw byte string,

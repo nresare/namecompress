@@ -4,5 +4,7 @@ target/
 
 .tmp/
 tables/
-table.ncmp*
+*.ncmp
+*.ncmp.xz
+*.ncmp.zst
 .DS_Store

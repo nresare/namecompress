@@ -6,7 +6,7 @@ use crate::chars::{Alphabet, CharModel};
 use crate::varint;
 
 const MAGIC: &[u8; 4] = b"NCMP";
-const VERSION: u16 = 2;
+const VERSION: u16 = 1;
 
 /// Smallest denominator used for dictionary frequencies. Larger dictionaries
 /// scale up from here, since every symbol needs a frequency of at least one

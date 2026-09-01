@@ -200,6 +200,25 @@ fn decode_field(
     apply_shape(&canonical, shape).ok_or(Error::Malformed)
 }
 
+/// Seed for the padding parity, distinct from the verification symbol's so the
+/// two carry independent information. A shared hash would correlate: with a
+/// power-of-two modulus the symbol is exactly the hash's low bits.
+const PADDING_SEED: u32 = 0x9e37_79b9;
+
+/// Parity bits for the spare room in a message's final byte.
+///
+/// Completing the last byte wastes 0 to 7 bits, averaging about 3.5. They are
+/// not part of the coded message, so filling them with a hash of the name
+/// costs nothing and lets a decoder that looks at them reject a corrupt or
+/// foreign message it would otherwise have accepted. A decoder that ignores
+/// them is still correct, which is what keeps this compatible.
+fn padding_value(table: &Table, name: &str) -> u64 {
+    crate::fingerprint_update(
+        crate::fingerprint_seed(table.id ^ PADDING_SEED),
+        name.as_bytes(),
+    )
+}
+
 /// The verification symbol, tying a message to the table that produced it.
 fn check_value(table: &Table, name: &str) -> u32 {
     let mut hash = crate::fingerprint_seed(table.id);
@@ -225,7 +244,7 @@ fn compress_modelled(table: &Table, name: &str) -> Option<Vec<u8>> {
     encode_field(&mut encoder, &table.given, table, given)?;
     encode_field(&mut encoder, &table.surname, table, surname)?;
     encode_check(&mut encoder, table, name);
-    Some(encoder.finish())
+    Some(encoder.finish(padding_value(table, name)))
 }
 
 fn compress_raw(table: &Table, name: &str) -> Result<Vec<u8>, Error> {
@@ -240,7 +259,7 @@ fn compress_raw(table: &Table, name: &str) -> Result<Vec<u8>, Error> {
         encoder.encode(u32::from(byte), 1, 256);
     }
     encode_check(&mut encoder, table, name);
-    Ok(encoder.finish())
+    Ok(encoder.finish(padding_value(table, name)))
 }
 
 /// Compresses a name, choosing whichever of the modelled and raw encodings is
@@ -278,6 +297,25 @@ pub fn decompress(table: &Table, bytes: &[u8]) -> Result<String, Error> {
     let found = decoder.target(table.check_modulus);
     if found != expected {
         return Err(Error::WrongTable);
+    }
+    decoder.advance(found, 1, table.check_modulus);
+
+    // Whatever bits were spare when the final byte was completed carry a
+    // second, independent parity. There are 0 to 7 of them, so this tightens
+    // the average message well beyond the verification symbol alone while
+    // leaving the worst case exactly where it was.
+    let spare = (bytes.len() * 8).saturating_sub(decoder.encoded_bits());
+    if spare > 7 {
+        // A well-formed message pads by less than a byte; more means the
+        // input was truncated or carries trailing rubbish.
+        return Err(Error::Malformed);
+    }
+    if spare > 0 {
+        let mask = (1u16 << spare) - 1;
+        let last = u16::from(*bytes.last().expect("message is non-empty"));
+        if last & mask != (padding_value(table, &name) as u16) & mask {
+            return Err(Error::WrongTable);
+        }
     }
     Ok(name)
 }
@@ -353,6 +391,47 @@ mod tests {
         for name in ["Nkemdirim Okonkwo", "Zzzz Qqqq", "John Nkemdirim"] {
             assert_round_trips(&table, name);
         }
+    }
+
+    /// Corrupting the final byte must be caught. Before the padding carried
+    /// parity, a flip landing in the spare bits was undetectable by
+    /// construction: those bits are not part of the coded message, so the
+    /// decode was unaffected and the verification symbol never saw them.
+    #[test]
+    fn detects_a_flipped_final_bit() {
+        let table = table();
+        for name in [
+            "John Smith",
+            "Sarah Jones",
+            "JOHN SMITH",
+            "john smith",
+            "Nkemdirim Okonkwo",
+            "Anna-Karin Smith",
+            "John Nkemdirim",
+        ] {
+            let mut packed = super::compress(&table, name).expect("compresses");
+            *packed.last_mut().expect("non-empty") ^= 1;
+            match super::decompress(&table, &packed) {
+                Err(_) => {}
+                Ok(other) => assert_ne!(
+                    other, name,
+                    "flipping the last bit of {name:?} went unnoticed"
+                ),
+            }
+        }
+    }
+
+    /// A well-formed message pads by less than a byte, so anything beyond that
+    /// is truncation or trailing rubbish rather than a message.
+    #[test]
+    fn rejects_trailing_rubbish() {
+        let table = table();
+        let mut packed = super::compress(&table, "John Smith").expect("compresses");
+        packed.push(0);
+        assert_eq!(
+            super::decompress(&table, &packed),
+            Err(super::Error::Malformed)
+        );
     }
 
     #[test]

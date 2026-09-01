@@ -38,10 +38,18 @@ impl BitWriter {
         }
     }
 
-    /// Pads the final byte with zeros and returns the buffer.
-    fn finish(mut self) -> Vec<u8> {
+    /// Completes the final byte, taking its spare low bits from `padding`.
+    ///
+    /// Those bits are never read back by the coder: the termination
+    /// guarantees any continuation decodes identically, which is why zero
+    /// padding works. That makes them free to carry something useful.
+    fn finish(mut self, padding: u64) -> Vec<u8> {
         if self.filled > 0 {
-            self.bytes.push(self.partial << (8 - self.filled));
+            let spare = 8 - self.filled;
+            let mask = (1u16 << spare) - 1;
+            let bits = (padding as u16) & mask;
+            self.bytes
+                .push((u16::from(self.partial) << spare) as u8 | bits as u8);
         }
         self.bytes
     }
@@ -143,12 +151,17 @@ impl Encoder {
         }
     }
 
-    /// Emits the two bits that pin down the final interval, then pads.
-    pub fn finish(mut self) -> Vec<u8> {
+    /// Emits the two bits that pin down the final interval, then completes
+    /// the last byte using the low bits of `padding`.
+    ///
+    /// Pass 0 for plain zero padding. Anything else rides along for free: the
+    /// spare bits are not part of the coded message and cannot change what it
+    /// decodes to.
+    pub fn finish(mut self, padding: u64) -> Vec<u8> {
         self.pending += 1;
         let bit = self.interval.low >= QUARTER;
         self.emit(bit);
-        self.out.finish()
+        self.out.finish(padding)
     }
 }
 
@@ -170,6 +183,17 @@ impl<'a> Decoder<'a> {
             value,
             input,
         }
+    }
+
+    /// Length in bits of the coded message, excluding the padding that
+    /// completes its final byte.
+    ///
+    /// The decoder performs exactly the renormalisation shifts the encoder
+    /// did, and starts 32 bits ahead of it, so its read position tracks the
+    /// encoder's output. The constant absorbs that lead and the two
+    /// termination bits. Only meaningful once every symbol has been consumed.
+    pub fn encoded_bits(&self) -> usize {
+        self.input.position.saturating_sub(30)
     }
 
     /// Returns a value in `[0, total)` locating the next symbol, which the
@@ -249,7 +273,7 @@ mod tests {
             for &s in &message {
                 encoder.encode(cumulative[s], freqs[s], total);
             }
-            let bytes = encoder.finish();
+            let bytes = encoder.finish(0);
 
             let mut decoder = Decoder::new(&bytes);
             for &expected in &message {
@@ -264,6 +288,42 @@ mod tests {
         }
     }
 
+    /// The padding must not be able to change what a message decodes to.
+    /// This is the property that lets those bits carry parity while remaining
+    /// invisible to a decoder that ignores them.
+    #[test]
+    fn padding_does_not_affect_decoding() {
+        let freqs = [7000u32, 300, 40, 1];
+        let total: u32 = freqs.iter().sum();
+        let cumulative = [0u32, 7000, 7300, 7340];
+        let message = [0usize, 1, 0, 2, 0, 0, 3, 1];
+
+        let mut decoded = Vec::new();
+        for padding in [0u64, u64::MAX, 0x5555_5555_5555_5555, 0xAAAA_AAAA_AAAA_AAAA] {
+            let mut encoder = Encoder::new();
+            for &s in &message {
+                encoder.encode(cumulative[s], freqs[s], total);
+            }
+            let bytes = encoder.finish(padding);
+
+            let mut decoder = Decoder::new(&bytes);
+            let mut out = Vec::new();
+            for _ in &message {
+                let target = decoder.target(total);
+                let s = cumulative
+                    .iter()
+                    .rposition(|&c| c <= target)
+                    .expect("in range");
+                decoder.advance(cumulative[s], freqs[s], total);
+                out.push(s);
+            }
+            assert_eq!(out, message, "padding {padding:#x} changed the decode");
+            decoded.push(bytes.len());
+        }
+        // Padding never changes the length either, only the spare bits.
+        assert!(decoded.windows(2).all(|w| w[0] == w[1]));
+    }
+
     /// A single near-certain symbol must cost essentially nothing.
     #[test]
     fn near_certain_symbol_is_cheap() {
@@ -271,6 +331,6 @@ mod tests {
         for _ in 0..64 {
             encoder.encode(0, 65_535, 65_536);
         }
-        assert!(encoder.finish().len() <= 3);
+        assert!(encoder.finish(0).len() <= 3);
     }
 }

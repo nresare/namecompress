@@ -370,6 +370,49 @@ a foreign message at 1/*M*. At the default *M* = 16384 that is 14 bits, roughly
 rejection measures at 0%, because every symbol carries non-zero probability and
 so every bit string decodes to *some* valid name.
 
+### 6.1 Padding parity
+
+The final byte of a message is completed with 0 to 7 spare bits, averaging
+about 3.4. They are not part of the coded message: the termination emits
+enough bits that *any* continuation decodes identically, which is why zero
+padding works at all. They therefore cost nothing and carry a second,
+independent parity.
+
+**Checking them is optional.** A decoder that ignores the spare bits is
+correct and interoperates fully — this section adds confidence, it does not
+change the format. The worst case is unchanged, because a message that lands
+on a byte boundary has no spare bits; what improves is the average.
+
+| | worst case | average |
+|---|---|---|
+| Verification symbol alone | 1/*M* | 1/*M* |
+| With padding parity | 1/*M* | ≈ 1/4*M* |
+
+Measured against a foreign table at *M* = 16384, undetected corruption falls
+from about 0.0061% to 0.0017%.
+
+To check them:
+
+1. **Advance the check symbol.** §6 says no `advance` is needed because it is
+   the last symbol. That holds only if you stop there; the renormalisation
+   shifts it performs are needed for the arithmetic below.
+2. **Find the coded bit length.** The decoder performs exactly the shifts the
+   encoder did and starts 32 bits ahead of it, so `position - 30` is the
+   encoder's output length in bits, where `position` counts bits pulled by the
+   reader (§1.2). The constant absorbs the 32-bit lead and the two termination
+   bits.
+3. **Derive the spare count** as `8 × len - encodedBits`. It is always 0 to 7.
+   A larger value means the message was truncated or carries trailing rubbish,
+   which is malformed rather than merely unverified.
+4. **Compare.** The spare bits are the low bits of the final byte. Hash the
+   decoded name as in §6 but seeded with `tableId XOR 0x9e3779b9`, and compare
+   the low `spare` bits of that hash against the low `spare` bits of the final
+   byte.
+
+The distinct seed matters. With a power-of-two modulus the verification symbol
+is exactly the hash's low bits, so reusing one hash for both would make the
+second check partly redundant rather than independent.
+
 **A modulus of 1 disables the check, and costs nothing.** Narrowing the coder's
 interval to the whole of itself leaves it unchanged, so the symbol consumes no
 bits; `target(1)` is always 0 and `hash % 1` is always 0, so the comparison
@@ -398,16 +441,22 @@ namecompress-tools GB.csv --build-table --rough-target-size 200k --out table.ncm
 | Table id | `0x95585d0d` |
 | Check modulus | 16384 |
 
-| Name | Message | Bytes | Exercises |
-|---|---|---|---|
-| `John Smith` | `62cb4ef8` | 4 | Dictionary hit, as-is |
-| `JOHN SMITH` | `63c31b8e03` | 5 | Upper shape |
-| `john smith` | `63b64138c8` | 5 | Lower shape |
-| `Sarah Jones` | `b54f25c4` | 4 | Dictionary hit |
-| `Ada Lovelace` | `0167eb06b78e` | 6 | Dictionary hit |
-| `Anna-Karin Nilsson` | `d5c9962902e257ead65c` | 10 | Hyphen, title shape |
-| `Zaphod Beeblebrox` | `ef5dad485f8103d4c50d947056c6a0` | 15 | Escape, character model |
-| `Siobhán O'Brien` | `fc3243d2804d56b77295b43a7675576779cf9848` | 20 | Raw fallback |
+| Name | Message | Bytes | Spare | Exercises |
+|---|---|---|---|---|
+| `John Smith` | `62cb4ef9` | 4 | 3 | Dictionary hit, as-is |
+| `JOHN SMITH` | `63c31b8e03` | 5 | 0 | Upper shape, no spare bits |
+| `john smith` | `63b64138c9` | 5 | 1 | Lower shape |
+| `Sarah Jones` | `b54f25c5` | 4 | 2 | Dictionary hit |
+| `Ada Lovelace` | `0167eb06b78e` | 6 | 1 | Dictionary hit |
+| `Anna-Karin Nilsson` | `d5c9962902e257ead65d` | 10 | 1 | Hyphen, title shape |
+| `Zaphod Beeblebrox` | `ef5dad485f8103d4c50d947056c6a9` | 15 | 4 | Escape, character model |
+| `Siobhán O'Brien` | `fc3243d2804d56b77295b43a7675576779cf984e` | 20 | 3 | Raw fallback |
+
+The **Spare** column is the padding-parity bit count from §6.1, useful for
+checking that arithmetic directly. `JOHN SMITH` has none, so its message is
+byte-identical whether or not the encoder writes padding parity; `Ada
+Lovelace` has one spare bit whose hash value happens to be 0, so it too is
+unchanged. Neither is a coincidence worth relying on — the other six differ.
 
 Generate more with the reference tool:
 
@@ -433,6 +482,9 @@ as a wrong name rather than an error.
 6. **Raw mode.** `Siobhán O'Brien` takes the fallback.
 7. **Verification.** Enable it last, then confirm a message decoded against a
    *different* table is rejected.
+8. **Padding parity (optional, §6.1).** Only worth attempting once everything
+   above passes, since it depends on the bit accounting being exactly right.
+   Check it against the Spare column before trusting it.
 
 Nothing above requires an encoder. Case shapes are chosen by the encoder and
 merely applied by the decoder, so the reverse mapping is never needed, and the
